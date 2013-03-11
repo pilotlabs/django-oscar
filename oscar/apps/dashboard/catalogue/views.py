@@ -207,12 +207,12 @@ class ProductCreateUpdateView(generic.UpdateView):
                                                            self.request.FILES,
                                                            instance=product)
 
-        is_valid = all([not self.is_stockrecord_submitted() or
-                        stockrecord_form.is_valid(),
-                        category_formset.is_valid(),
-                        image_formset.is_valid(),
-                        recommended_formset.is_valid(),
-                        ])
+        is_valid = all([
+            not self.is_stockrecord_submitted() or stockrecord_form.is_valid(),
+            category_formset.is_valid(),
+            image_formset.is_valid(),
+            recommended_formset.is_valid(),
+        ])
 
         if is_valid:
             if self.object is not None:
