@@ -102,6 +102,7 @@ class ProductCreateUpdateView(generic.UpdateView):
     category_formset = ProductCategoryFormSet
     image_formset = ProductImageFormSet
     recommendations_formset = ProductRecommendationFormSet
+    stockrecord_form = StockRecordForm
 
     def get_object(self, queryset=None):
         """
@@ -115,10 +116,8 @@ class ProductCreateUpdateView(generic.UpdateView):
             self.product_class = obj.product_class
             return obj
         else:  # CreateView
-            product_class_id = self.kwargs.get('product_class_id', None)
-            if product_class_id is None:
-                raise Http404
             try:
+                product_class_id = self.kwargs.get('product_class_id', None)
                 self.product_class = ProductClass.objects.get(
                     id=product_class_id)
             except ObjectDoesNotExist:
@@ -137,7 +136,7 @@ class ProductCreateUpdateView(generic.UpdateView):
         if 'recommended_formset' not in ctx:
             ctx['recommended_formset'] = self.recommendations_formset(instance=self.object)
         if self.object is None:
-            ctx['product_class'] = self.product_class
+            ctx['title'] = _('Create new %s product') % self.product_class.name
         else:
             ctx['title'] = ctx['product'].get_title()
         return ctx
@@ -148,7 +147,15 @@ class ProductCreateUpdateView(generic.UpdateView):
         return kwargs
 
     def is_stockrecord_submitted(self):
-        return len(self.request.POST.get('partner', '')) > 0
+        """
+        Check if there's POST data that matches StockRecordForm field names
+        """
+        fields = dict(self.stockrecord_form.base_fields.items() +
+                      self.stockrecord_form.declared_fields.items())
+        for name, field in fields.iteritems():
+            if len(self.request.POST.get(name, '')) > 0:
+                return True
+        return False
 
     def get_stockrecord_form(self):
         """
@@ -157,22 +164,27 @@ class ProductCreateUpdateView(generic.UpdateView):
         stock record it will be passed into the form as
         ``instance``.
         """
-        if self.object is None:
-            if self.is_stockrecord_submitted():
-                return StockRecordForm(self.product_class, self.request.POST)
-            return StockRecordForm(self.product_class)
-        else:
+        try:
+            stockrecord = self.object.stockrecord
+        except (AttributeError, StockRecord.DoesNotExist):
+            # either self.object is None, or no stockrecord
             stockrecord = None
-            if self.object.has_stockrecord:
-                stockrecord = self.object.stockrecord
-            if not self.is_stockrecord_submitted():
-                return StockRecordForm(self.product_class, instance=stockrecord)
-            return StockRecordForm(
-                self.product_class,
-                self.request.POST,
-                instance=stockrecord)
+        return self.stockrecord_form(
+            product_class=self.product_class,
+            data=self.request.POST if self.is_stockrecord_submitted() else None,
+            instance=stockrecord)
+
+    def form_valid(self, form):
+        return self.process_all_forms(form)
 
     def form_invalid(self, form):
+        return self.process_all_forms(form)
+
+    def process_all_forms(self, form):
+        """
+        Short-circuits the regular logic to have one place to have our
+        logic to check all forms
+        """
         stockrecord_form = self.get_stockrecord_form()
         category_formset = self.category_formset(self.request.POST,
                                                  instance=self.object)
@@ -181,63 +193,50 @@ class ProductCreateUpdateView(generic.UpdateView):
                                            instance=self.object)
         recommended_formset = self.recommendations_formset(
             self.request.POST, self.request.FILES, instance=self.object)
-        messages.error(self.request,
-                       _("Your submitted data was not valid - please "
-                         "correct the below errors"))
-        ctx = self.get_context_data(form=form,
-                                    stockrecord_form=stockrecord_form,
-                                    category_formset=category_formset,
-                                    image_formset=image_formset,
-                                    recommended_formset=recommended_formset)
-        return self.render_to_response(ctx)
-
-    def form_valid(self, form):
-        if self.object is None:
-            product = form.save()
-        else:
-            product = self.object
-
-        stockrecord_form = self.get_stockrecord_form()
-        category_formset = self.category_formset(self.request.POST,
-                                                 instance=product)
-        image_formset = self.image_formset(self.request.POST,
-                                           self.request.FILES,
-                                           instance=product)
-        recommended_formset = self.recommendations_formset(self.request.POST,
-                                                           self.request.FILES,
-                                                           instance=product)
 
         is_valid = all([
-            not self.is_stockrecord_submitted() or stockrecord_form.is_valid(),
+            form.is_valid(),
             category_formset.is_valid(),
             image_formset.is_valid(),
             recommended_formset.is_valid(),
-        ])
+            not self.is_stockrecord_submitted() or stockrecord_form.is_valid(),
+            ])
 
         if is_valid:
-            if self.object is not None:
-                product = form.save()
+            return self.forms_valid(form, stockrecord_form, category_formset,
+                                    image_formset, recommended_formset)
+        else:
+            return self.forms_invalid(form, stockrecord_form, category_formset,
+                                      image_formset, recommended_formset)
 
-            if self.is_stockrecord_submitted():
-                # Save stock record
-                stockrecord = stockrecord_form.save(commit=False)
-                stockrecord.product = product
-                stockrecord.save()
-            # Save formsets
-            category_formset.save()
-            image_formset.save()
-            recommended_formset.save()
+    def forms_valid(self, form, stockrecord_form, category_formset,
+                    image_formset, recommended_formset):
+        # to allow get_success_url set different success messages
+        self.creating = self.object is None
+        self.object = form.save()
 
-            return HttpResponseRedirect(self.get_success_url(product))
+        if self.is_stockrecord_submitted():
+            # Save stock record
+            stockrecord = stockrecord_form.save(commit=False)
+            stockrecord.product = self.object
+            stockrecord.save()
+        else:
+            # delete it
+            if self.object.has_stockrecord:
+                self.object.stockrecord.delete()
 
+        # Save formsets
+        category_formset.save()
+        image_formset.save()
+        recommended_formset.save()
+
+        return HttpResponseRedirect(self.get_success_url())
+
+    def forms_invalid(self, form, stockrecord_form, category_formset,
+                      image_formset, recommended_formset):
         messages.error(self.request,
                        _("Your submitted data was not valid - please "
                          "correct the below errors"))
-
-        # Delete product as its relations were not valid
-        if self.object is None:
-            product.delete()
-
         ctx = self.get_context_data(form=form,
                                     stockrecord_form=stockrecord_form,
                                     category_formset=category_formset,
@@ -251,9 +250,9 @@ class ProductCreateUpdateView(generic.UpdateView):
             url_parts += [self.request.GET.urlencode()]
         return "?".join(url_parts)
 
-    def get_success_url(self, product=None):
-        if self.object is None:
-            msg = _("Created product '%s'") % product.title
+    def get_success_url(self):
+        if self.creating:
+            msg = _("Created product '%s'") % self.object.title
         else:
             msg = _("Updated product '%s'") % self.object.title
         messages.success(self.request, msg)
