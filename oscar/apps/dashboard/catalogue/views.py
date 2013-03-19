@@ -185,6 +185,12 @@ class ProductCreateUpdateView(generic.UpdateView):
         Short-circuits the regular logic to have one place to have our
         logic to check all forms
         """
+        self.creating = self.object is None
+        # need to create the product here because the inline forms need it
+        # can't use commit=False because ProductForm does not support it
+        if self.creating:
+            self.object = form.save()
+
         stockrecord_form = self.get_stockrecord_form()
         category_formset = self.category_formset(self.request.POST,
                                                  instance=self.object)
@@ -206,15 +212,13 @@ class ProductCreateUpdateView(generic.UpdateView):
             return self.forms_valid(form, stockrecord_form, category_formset,
                                     image_formset, recommended_formset)
         else:
+            if self.creating:
+                self.object.delete()
             return self.forms_invalid(form, stockrecord_form, category_formset,
                                       image_formset, recommended_formset)
 
     def forms_valid(self, form, stockrecord_form, category_formset,
                     image_formset, recommended_formset):
-        # to allow get_success_url set different success messages
-        self.creating = self.object is None
-        self.object = form.save()
-
         if self.is_stockrecord_submitted():
             # Save stock record
             stockrecord = stockrecord_form.save(commit=False)
